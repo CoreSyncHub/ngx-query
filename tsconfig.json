@@ -7,20 +7,36 @@
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true,
     "noImplicitReturns": true,
+    "baseUrl": ".",
+    "paths": {
+      "@coresync/ngx-query": ["projects/ngx-query/src/public-api.ts"]
+    },
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "isolatedModules": true,
     "experimentalDecorators": true,
     "importHelpers": true,
-    "target": "ES2022",
-    "module": "preserve"
+    "target": "ES2024",
+    "module": "preserve",
+    "moduleResolution": "Bundler",
+    "noErrorTruncation": true,
+    "forceConsistentCasingInFileNames": true
   },
   "angularCompilerOptions": {
     "enableI18nLegacyMessageIdFormat": false,
     "strictInjectionParameters": true,
     "strictInputAccessModifiers": true,
     "typeCheckHostBindings": true,
-    "strictTemplates": true
+    "strictTemplates": true,
+    "compilationMode": "partial"
   },
-  "files": []
+  "files": [],
+  "references": [
+    {
+      "path": "./projects/ngx-query/tsconfig.lib.json"
+    },
+    {
+      "path": "./projects/ngx-query/tsconfig.spec.json"
+    }
+  ]
 }

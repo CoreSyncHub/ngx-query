@@ -1,0 +1,33 @@
+{
+  "name": "@coresync/ngx-query",
+  "version": "0.1.0",
+  "description": "Minimal Query-like library for Angular 20 with RxJS and DI.",
+  "license": "MIT",
+  "keywords": [
+    "angular",
+    "rxjs",
+    "query",
+    "cache",
+    "di"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "@angular/common": "^20.0.0",
+    "@angular/core": "^20.0.0",
+    "rxjs": "^7.8.0"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CoreSyncHub/ngx-query.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CoreSyncHub/ngx-query/issues"
+  },
+  "homepage": "https://github.com/CoreSyncHub/ngx-query#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

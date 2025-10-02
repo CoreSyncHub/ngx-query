@@ -1,59 +1,63 @@
-# CoresyncNgxQueryclient
+# @coresync/ngx-query
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.3.1.
+Minimalistic Query-like library for Angular. RxJS only. DI native. SSR-friendly.
 
-## Development server
+## Installation
 
-To start a local development server, run:
+npm i @coresync/ngx-query
 
-```bash
-ng serve
+## Bootstrap
+
+```ts
+providers: [provideHttpClient(withFetch()), provideQueryClient({ staleTime: 10_000, retry: 3 })];
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## Query
 
-## Code scaffolding
+```ts
+const built = queryBuilder<void, UserDto[]>(queryClient)
+  .key(["users"])
+  .fetcher((_p, ct) => http.get<UserDto[]>("/api/users", { signal: ct }))
+  .staleTime(15_000)
+  .select((users) => users.filter((u) => u.role === "Admin"))
+  .build();
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
-
-```bash
-ng generate component component-name
+built.data$.subscribe();
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+## Mutation
 
-```bash
-ng generate --help
+```ts
+const m = mutationBuilder<CreateUserCommand, UserDto>(queryClient)
+  .key(["create-user"])
+  .mutateFn((cmd, ct) => http.post<UserDto>("/api/users", cmd, { signal: ct }))
+  .optimistic((cmd) => {
+    /* setQueryData(['users'], …) */
+  })
+  .rollback((cmd, err) => {
+    /* restore */
+  })
+  .build();
 ```
 
-## Building
+## Invalidation
 
-To build the project run:
-
-```bash
-ng build
+```ts
+queryClient.invalidateQueries((hashedKey) => hashedKey === JSON.stringify(["users"]));
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+## Covered patterns
 
-## Running unit tests
+- StaleTime, Backoff retry, Polling, Focus/Reconnect
+- Component side memoized selector
+- Optional toSignal interop
 
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
+## V1 limitations
 
-```bash
-ng test
-```
+- No ready-to-use infinite query (TODO: getNextPageParam / typed concat)
+- No devtools
+- Persistence in plugin (TODO)
 
-## Running end-to-end tests
+## Router / SSR
 
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+- `QueryPreloadResolver` + `TransferState` helpers provided (to be specialized).

@@ -3,5 +3,47 @@
   "version": 1,
   "newProjectRoot": "projects",
   "projects": {
+    "ngx-query": {
+      "projectType": "library",
+      "root": "projects/ngx-query",
+      "sourceRoot": "projects/ngx-query/src",
+      "prefix": "lib",
+      "architect": {
+        "build": {
+          "builder": "@angular/build:ng-packagr",
+          "configurations": {
+            "production": {
+              "tsConfig": "projects/ngx-query/tsconfig.lib.prod.json"
+            },
+            "development": {
+              "tsConfig": "projects/ngx-query/tsconfig.lib.json"
+            }
+          },
+          "defaultConfiguration": "production"
+        },
+        "test": {
+          "builder": "@angular/build:karma",
+          "options": {
+            "tsConfig": "projects/ngx-query/tsconfig.spec.json"
+          }
+        },
+        "lint": {
+          "builder": "@angular-eslint/builder:lint",
+          "options": {
+            "lintFilePatterns": [
+              "projects/ngx-query/**/*.ts",
+              "projects/ngx-query/**/*.html"
+            ],
+            "eslintConfig": "projects/ngx-query/eslint.config.cjs"
+          }
+        }
+      }
+    }
+  },
+  "cli": {
+    "analytics": false,
+    "schematicCollections": [
+      "angular-eslint"
+    ]
   }
 }
