@@ -4,7 +4,12 @@ import { Observable } from 'rxjs';
 export type QueryKey<TQueryKey = unknown> = Readonly<TQueryKey>;
 
 /** Reason for a refetch triggered by the system. */
-export type RefetchReason = 'manual' | 'focus' | 'reconnect' | 'interval' | 'retry';
+export type RefetchReason =
+  | 'manual'
+  | 'focus'
+  | 'reconnect'
+  | 'interval'
+  | 'retry';
 
 /** Memoized selector applied to raw data. */
 export type SelectFn<TData, TSelectedData> = (data: TData) => TSelectedData;
@@ -24,7 +29,11 @@ export interface QueryState<TData = unknown, TError = unknown> {
 }
 
 /** State of a mutation. */
-export interface MutationState<TData = unknown, TError = unknown, TVariables = unknown> {
+export interface MutationState<
+  TData = unknown,
+  TError = unknown,
+  TVariables = unknown
+> {
   status: 'idle' | 'loading' | 'error' | 'success';
   data?: TData;
   error?: TError;
@@ -40,6 +49,8 @@ export interface QueryConfig {
   retry: RetryStrategy;
   refetchOnFocus: boolean;
   refetchOnReconnect: boolean;
+  maxQueryCacheSize: number;
+  maxMutationCacheSize: number;
 }
 
 /** Pure observable fetch function. Use abortSignal to cancel. */
@@ -55,4 +66,9 @@ export type MutateFn<TVariables, TData> = (
 ) => Observable<TData>;
 
 /** Invalidate predicate */
-export type InvalidatePredicate = (hashedKey: string, tags: ReadonlySet<string>) => boolean;
+export type InvalidatePredicate = (
+  hashedKey: string,
+  tags: ReadonlySet<string>
+) => boolean;
+
+export type EvictPredicate = (hashedKey: string) => boolean;

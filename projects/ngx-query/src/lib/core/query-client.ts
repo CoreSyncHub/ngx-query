@@ -1,15 +1,31 @@
-import { catchError, defer, map, Observable, Subject, switchMap, throwError, timer } from 'rxjs';
-import { MutationCache } from './mutation-cache';
-import { QueryCache } from './query-cache';
-import { InvalidatePredicate, QueryConfig, QueryState, RetryStrategy } from './types';
+import {
+  catchError,
+  defer,
+  map,
+  Observable,
+  Subject,
+  switchMap,
+  throwError,
+  timer,
+} from 'rxjs';
 import { hashQueryKey } from '../helpers/key-hasher';
 import { exponentialBackoffDelay } from './backoff';
+import { MutationCache } from './mutation-cache';
+import { QueryCache } from './query-cache';
+import {
+  InvalidatePredicate,
+  QueryConfig,
+  QueryState,
+  RetryStrategy,
+} from './types';
 
 export class QueryClient {
-  public readonly queries = new QueryCache();
-  public readonly mutations = new MutationCache();
+  public readonly queries: QueryCache;
+  public readonly mutations: MutationCache;
 
-  private readonly invalidate$ = new Subject<{ predicate: InvalidatePredicate }>();
+  private readonly invalidate$ = new Subject<{
+    predicate: InvalidatePredicate;
+  }>();
   private readonly config: QueryConfig;
 
   private readonly refCounts = new Map<string, number>();
@@ -21,8 +37,17 @@ export class QueryClient {
       retry: 3,
       refetchOnFocus: true,
       refetchOnReconnect: true,
+      maxQueryCacheSize: 500,
+      maxMutationCacheSize: 200,
       ...config,
     };
+    this.queries = new QueryCache(this.config.maxQueryCacheSize, (key) =>
+      this.canEvictQuery(key)
+    );
+    this.mutations = new MutationCache(
+      this.config.maxMutationCacheSize,
+      (key) => this.canEvictMutation(key)
+    );
   }
 
   /** Reads the current data from a query, if present */
@@ -70,7 +95,9 @@ export class QueryClient {
         catchError((error) => {
           if (this.shouldRetry(retry, attempt++, error)) {
             const delay = exponentialBackoffDelay(attempt);
-            return timer(delay).pipe(switchMap(() => this.retryWithBackoff(sourceFactory, retry)));
+            return timer(delay).pipe(
+              switchMap(() => this.retryWithBackoff(sourceFactory, retry))
+            );
           }
           return throwError(() => error);
         })
@@ -86,6 +113,18 @@ export class QueryClient {
   /** Default config */
   public defaults(): Readonly<QueryConfig> {
     return this.config;
+  }
+
+  private canEvictQuery(hashedKey: string): boolean {
+    const ref = this.refCounts.get(hashedKey) ?? 0;
+    const state = this.queries.peek(hashedKey);
+    const fetching = !!state?.isFetching;
+    return ref <= 0 && !fetching;
+  }
+
+  private canEvictMutation(hashedKey: string): boolean {
+    const state = this.mutations.peek(hashedKey);
+    return !state?.isMutating;
   }
 
   // #region GC API
@@ -112,7 +151,9 @@ export class QueryClient {
       if (this.refCounts.has(hashedKey)) return;
       const state = this.queries.peek(hashedKey);
       const isFetching = !!state?.isFetching;
-      const age = state?.updatedAt ? Date.now() - state.updatedAt : Number.POSITIVE_INFINITY;
+      const age = state?.updatedAt
+        ? Date.now() - state.updatedAt
+        : Number.POSITIVE_INFINITY;
       const isOld = age >= this.config.gcTime;
       if (!isFetching && isOld) {
         this.queries.delete(hashedKey);

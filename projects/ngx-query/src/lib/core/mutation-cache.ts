@@ -1,20 +1,12 @@
-import { BehaviorSubject } from 'rxjs';
-import { MutationState } from './types';
+import { BaseCache } from './base-cache';
+import { EvictPredicate, MutationState } from './types';
 
-/** Reactive states of mutations by key */
-export class MutationCache {
-  private readonly store = new Map<string, BehaviorSubject<MutationState>>();
-
-  public get$(hashedKey: string): BehaviorSubject<MutationState> {
-    let subject = this.store.get(hashedKey);
-    if (!subject) {
-      subject = new BehaviorSubject<MutationState>({ status: 'idle', isMutating: false });
-      this.store.set(hashedKey, subject);
-    }
-    return subject;
-  }
-
-  public set(hashedKey: string, state: MutationState): void {
-    this.get$(hashedKey).next(state);
+/** MutationStates cache with “safe” LRU eviction. */
+export class MutationCache extends BaseCache<MutationState> {
+  public constructor(capacity: number, canEvict: EvictPredicate) {
+    super(capacity, canEvict, () => ({
+      status: 'idle',
+      isMutating: false,
+    }));
   }
 }
