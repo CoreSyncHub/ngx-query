@@ -17,11 +17,22 @@ export type {
   InvalidatePredicate,
 } from './lib/core/types';
 
-export { queryBuilder, type BuiltQuery } from './lib/builders/query-builder';
-export { mutationBuilder, type BuiltMutation } from './lib/builders/mutation-builder';
+export {
+  queryBuilder,
+  type BuiltQuery,
+  type QueryBuilder,
+} from './lib/builders/query-builder';
+export {
+  mutationBuilder,
+  type BuiltMutation,
+} from './lib/builders/mutation-builder';
 
 export { toSignal } from './lib/helpers/to-signal';
+export { isSignalLike, type SignalLike } from './lib/helpers/signal-like';
 
 // Router / SSRs
 export { QueryPreloadResolver } from './lib/angular/resolver';
-export { writeToTransferState, readFromTransferState } from './lib/angular/transfer-state';
+export {
+  writeToTransferState,
+  readFromTransferState,
+} from './lib/angular/transfer-state';
