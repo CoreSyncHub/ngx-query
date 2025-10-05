@@ -7,6 +7,9 @@ export class MutationCache extends BaseCache<MutationState> {
     super(capacity, canEvict, () => ({
       status: 'idle',
       isMutating: false,
+      data: undefined,
+      error: undefined,
+      updatedAt: undefined,
     }));
   }
 }

@@ -4,7 +4,8 @@
  */
 
 export { provideQueryClient } from './lib/angular/providers';
-export { QUERY_CONFIG } from './lib/angular/tokens';
+export { QUERY_CONFIG, QUERY_CLIENT } from './lib/angular/tokens';
+export { injectQueryClient } from './lib/angular/inject-query-client';
 export type { QueryConfig } from './lib/core/types';
 
 export { QueryClient } from './lib/core/query-client';

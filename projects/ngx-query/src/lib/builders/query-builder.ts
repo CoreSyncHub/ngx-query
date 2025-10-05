@@ -1,9 +1,10 @@
 import {
   BehaviorSubject,
-  combineLatest,
   defer,
   distinctUntilChanged,
   EMPTY,
+  endWith,
+  exhaustMap,
   filter,
   finalize,
   fromEvent,
@@ -15,9 +16,11 @@ import {
   of,
   shareReplay,
   startWith,
+  Subject,
   switchMap,
   take,
   tap,
+  withLatestFrom,
 } from 'rxjs';
 import {
   QueryFetcher,
@@ -353,7 +356,7 @@ class QueryBuilderImpl<
   private pollingInterval?: number;
   private paramsEqual?: (a: TParams, b: TParams) => boolean;
 
-  private readonly refetch$ = new BehaviorSubject<RefetchReason>('manual');
+  private readonly refetch$ = new Subject<RefetchReason>();
 
   public constructor(private readonly queryClient: QueryClient) {}
 
@@ -477,61 +480,43 @@ class QueryBuilderImpl<
     if (!this._fetcher)
       throw new Error('Query fetcher is required. Use .fetcher(...)');
 
-    const hashed$ = this.queryKey$.pipe(
+    const active$ = this.queryKey$.pipe(
       map((k) => hashQueryKey(k)),
       distinctUntilChanged()
     );
 
-    const stateSubject$ = hashed$.pipe(
-      map(
-        (h) =>
-          this.queryClient.queries.get$(h) as BehaviorSubject<
-            QueryState<TData, TError>
-          >
-      )
-    );
+    const scoped$ = active$.pipe(
+      map((h) => {
+        const subject$ = this.queryClient.queries.get$(h) as BehaviorSubject<
+          QueryState<TData, TError>
+        >;
+        const state$ = subject$.asObservable();
 
-    const state$ = hashed$.pipe(
-      map(
-        (h) =>
-          this.queryClient.queries.get$(h) as BehaviorSubject<
-            QueryState<TData, TError>
-          >
-      ),
-      switchMap((s$) => s$)
-    );
+        const focus$ =
+          this.refetchOnFocus && isBrowser()
+            ? fromEvent(window, 'focus').pipe(map(() => 'focus' as const))
+            : EMPTY;
+        const online$ =
+          this.refetchOnReconnect && isBrowser()
+            ? fromEvent(window, 'online').pipe(map(() => 'reconnect' as const))
+            : EMPTY;
+        const poll$ = this.pollingInterval
+          ? interval(this.pollingInterval).pipe(map(() => 'interval' as const))
+          : EMPTY;
+        const invalidations$ = this.queryClient.invalidations$().pipe(
+          filter((predicate) => predicate(h, new Set())),
+          map(() => 'manual' as const)
+        );
+        const paramsChanged$ = this.params$.pipe(
+          distinctUntilChanged(this.paramsEqual ?? ((a, b) => a === b)),
+          map(() => 'params' as const)
+        );
 
-    const focus$ =
-      this.refetchOnFocus && isBrowser()
-        ? fromEvent(window, 'focus').pipe(map(() => 'focus' as const))
-        : EMPTY;
-    const online$ =
-      this.refetchOnReconnect && isBrowser()
-        ? fromEvent(window, 'online').pipe(map(() => 'reconnect' as const))
-        : EMPTY;
-    const poll$ = this.pollingInterval
-      ? interval(this.pollingInterval).pipe(map(() => 'interval' as const))
-      : EMPTY;
-    const invalidations$ = combineLatest([
-      this.queryClient.invalidations$(),
-      hashed$,
-    ]).pipe(
-      filter(([predicate, h]) => predicate(h, new Set())),
-      map(() => 'manual' as const)
-    );
-    const paramsChanged$ = this.params$.pipe(
-      distinctUntilChanged(this.paramsEqual ?? ((a, b) => a === b)),
-      map(() => 'params' as const)
-    );
-
-    const runFetch$ = defer(() =>
-      stateSubject$.pipe(
-        take(1),
-        switchMap((subject) => {
+        const runFetch$ = defer(() => {
           const abortController = new AbortController();
 
-          subject.next({
-            ...subject.value,
+          subject$.next({
+            ...subject$.value,
             status: 'loading',
             isFetching: true,
           });
@@ -539,9 +524,10 @@ class QueryBuilderImpl<
           const run$ = this.params$.pipe(
             switchMap((currentParams) =>
               this._fetcher(currentParams, abortController.signal).pipe(
+                take(1),
                 tap({
                   next: (data) =>
-                    subject.next({
+                    subject$.next({
                       status: 'success',
                       data,
                       isFetching: false,
@@ -549,78 +535,93 @@ class QueryBuilderImpl<
                       error: undefined,
                     }),
                   error: (error) =>
-                    subject.next({
-                      ...subject.value,
+                    subject$.next({
+                      ...subject$.value,
                       status: 'error',
                       error,
                       isFetching: false,
                     }),
-                }),
-                finalize(() => abortController.abort())
+                })
               )
             )
           );
 
-          return this.queryClient.retryWithBackoff(() => run$, this.retry);
-        })
-      )
-    );
+          return this.queryClient
+            .retryWithBackoff(() => run$, this.retry)
+            .pipe(endWith(true));
+        });
 
-    const trigger$ = merge(
-      this.refetch$,
-      focus$,
-      online$,
-      poll$,
-      invalidations$,
-      paramsChanged$
-    );
+        const trigger$ = merge(
+          of<'init'>('init'),
+          this.refetch$,
+          focus$,
+          online$,
+          poll$,
+          invalidations$,
+          paramsChanged$
+        );
 
-    const selected$ = combineLatest([
-      state$,
-      this.enabled$.pipe(startWith(true)),
-      merge(of<'init'>('init'), trigger$),
-    ]).pipe(
-      switchMap(([state, enabled, tick]) => {
-        if (!enabled) return of(state);
+        const driver$ = trigger$.pipe(
+          withLatestFrom(state$, this.enabled$.pipe(startWith(true))),
+          filter(([, , enabled]) => enabled),
+          exhaustMap(([tick, state]) => {
+            const needsFirst = state.status === 'idle' && !state.isFetching;
+            const isStale =
+              !state.updatedAt ||
+              Date.now() - (state.updatedAt ?? 0) >= this._staleTime;
+            const external = tick !== 'init';
+            const shouldRefetch =
+              needsFirst || (!state.isFetching && (isStale || external));
+            return shouldRefetch ? runFetch$ : EMPTY;
+          }),
+          shareReplay({ bufferSize: 1, refCount: true })
+        );
 
-        const isStale =
-          !state.updatedAt ||
-          Date.now() - (state.updatedAt ?? 0) >= this._staleTime;
+        const selected$ = state$.pipe(
+          map((s) =>
+            s.data === undefined
+              ? undefined
+              : (this.applySelectors(s.data) as TSelected)
+          ),
+          distinctUntilChanged(this.equal ?? ((a, b) => a === b))
+        );
 
-        const shouldRefetch = !state.isFetching && (isStale || tick !== 'init');
-
-        return shouldRefetch
-          ? runFetch$.pipe(switchMap(() => state$.pipe(take(1))))
-          : of(state);
+        return { h, state$, driver$, selected$ };
       }),
-      map((state) => {
-        if (state.data === undefined) return undefined;
-        return this.applySelectors(state.data) as TSelected;
-      }),
-      distinctUntilChanged(this.equal ?? ((a, b) => a === b))
+      shareReplay({ bufferSize: 1, refCount: true })
     );
 
     const data$ = defer(() => {
       let currentH: string | undefined;
 
-      const retainSub = hashed$.subscribe((h) => {
+      const retainSub = scoped$.subscribe(({ h }) => {
         if (currentH && currentH !== h)
           this.queryClient.release(currentH, this._gcTime);
         this.queryClient.retain(h);
         currentH = h;
       });
 
-      return selected$.pipe(
+      const driverSub = scoped$.pipe(switchMap((s) => s.driver$)).subscribe();
+
+      return scoped$.pipe(
+        switchMap((s) => s.selected$),
         finalize(() => {
+          driverSub.unsubscribe();
           retainSub.unsubscribe();
           if (currentH) this.queryClient.release(currentH, this._gcTime);
         })
       );
     }).pipe(shareReplay({ bufferSize: 1, refCount: true }));
 
-    const error$ = state$.pipe(map((s) => s.error));
-    const status$ = state$.pipe(map((s) => s.status));
-    const isFetching$ = state$.pipe(map((s) => s.isFetching));
+    const status$ = scoped$.pipe(
+      switchMap((s) => s.state$.pipe(map((st) => st.status)))
+    );
+    const error$ = scoped$.pipe(
+      switchMap((s) => s.state$.pipe(map((st) => st.error)))
+    );
+    const isFetching$ = scoped$.pipe(
+      switchMap((s) => s.state$.pipe(map((st) => st.isFetching)))
+    );
 
     return {
       data$,

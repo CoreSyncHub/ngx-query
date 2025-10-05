@@ -7,6 +7,9 @@ export class QueryCache extends BaseCache<QueryState> {
     super(capacity, canEvict, () => ({
       status: 'idle',
       isFetching: false,
+      data: undefined,
+      error: undefined,
+      updatedAt: undefined,
     }));
   }
 }

@@ -22,6 +22,7 @@ import {
 import { EnvironmentInjector } from '@angular/core';
 
 export class QueryClient {
+  public readonly injector?: EnvironmentInjector;
   public readonly queries: QueryCache;
   public readonly mutations: MutationCache;
 
@@ -34,7 +35,7 @@ export class QueryClient {
 
   public constructor(
     config?: Partial<QueryConfig>,
-    public readonly injector?: EnvironmentInjector
+    injector?: EnvironmentInjector
   ) {
     this.config = {
       staleTime: 5_000,
@@ -53,6 +54,7 @@ export class QueryClient {
       this.config.maxMutationCacheSize,
       (key) => this.canEvictMutation(key)
     );
+    this.injector = injector;
   }
 
   /** Reads the current data from a query, if present */
