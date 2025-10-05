@@ -15,6 +15,7 @@ import { QueryCache } from './query-cache';
 import {
   InvalidatePredicate,
   QueryConfig,
+  QueryKey,
   QueryState,
   RetryStrategy,
 } from './types';
@@ -51,13 +52,14 @@ export class QueryClient {
   }
 
   /** Reads the current data from a query, if present */
-  public getQueryData<TData>(hashedKey: string): TData | undefined {
+  public getQueryData<TData>(queryKey: QueryKey): TData | undefined {
+    const hashedKey = hashQueryKey(queryKey);
     return this.queries.peek(hashedKey)?.data as TData | undefined;
   }
 
-  public setQueryData<TData>(queryKey: string, data: TData): void {
-    const key = hashQueryKey(queryKey);
-    const prev = this.queries.peek(key);
+  public setQueryData<TData>(queryKey: QueryKey, data: TData): void {
+    const hashedKey = hashQueryKey(queryKey);
+    const prev = this.queries.peek(hashedKey);
     const next: QueryState<TData> = {
       status: 'success',
       data,
@@ -65,8 +67,8 @@ export class QueryClient {
       isFetching: false,
       updatedAt: Date.now(),
     };
-    if (prev) this.queries.set(key, next);
-    else this.queries.get$(key).next(next);
+    if (prev) this.queries.set(hashedKey, next);
+    else this.queries.get$(hashedKey).next(next);
   }
 
   /** Invalidate by predicate. Triggers a refetch by active builders */

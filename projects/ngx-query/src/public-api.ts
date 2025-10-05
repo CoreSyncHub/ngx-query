@@ -25,6 +25,9 @@ export {
 export {
   mutationBuilder,
   type BuiltMutation,
+  type MutationBuilder,
+  type AffectKeys,
+  type OptimisticCtx,
 } from './lib/builders/mutation-builder';
 
 export { toSignal } from './lib/helpers/to-signal';
