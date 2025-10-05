@@ -31,7 +31,6 @@ export {
   type OptimisticCtx,
 } from './lib/builders/mutation-builder';
 
-export { toSignal } from './lib/helpers/to-signal';
 export { isSignalLike, type SignalLike } from './lib/helpers/signal-like';
 
 // Router / SSRs
