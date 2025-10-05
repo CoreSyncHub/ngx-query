@@ -16,6 +16,7 @@ import {
   shareReplay,
   startWith,
   switchMap,
+  take,
   tap,
 } from 'rxjs';
 import {
@@ -29,7 +30,7 @@ import {
 import { QueryClient } from '../core/query-client';
 import { hashQueryKey } from '../helpers/key-hasher';
 import { isBrowser } from '../helpers/env';
-import { isSignal, Signal } from '@angular/core';
+import { isSignal, runInInjectionContext, Signal } from '@angular/core';
 import { toObservable } from '@angular/core/rxjs-interop';
 import { isSignalLike, SignalLike } from '../helpers/signal-like';
 
@@ -77,7 +78,8 @@ export interface BuiltQuery<TSelected = unknown, TError = unknown> {
   isFetching$: Observable<boolean>;
 
   /**
-   * Triggers a refetch. Optionally provide a {@link RefetchReason} for instrumentation.
+   * Triggers a refetch immediately, even if data is still fresh (bypasses `staleTime`).
+   * Optionally provide a {@link RefetchReason} for instrumentation.
    *
    * @example
    * query.refetch();            // manual refetch
@@ -113,15 +115,22 @@ export interface QueryBuilder<
   TSelected = TData
 > {
   /**
-   * Defines the query key. Required.
+   * Defines the query key. Required. Accepts a static value, an RxJS `Observable`,
+   * or an Angular Signal. When the key changes, the builder will switch to the
+   * new cache entry (retain/release are handled automatically).
    *
    * @example
-   * .key(['users', organizationId])
+   * .key(['user', userId])               // static
+   * .key(userKey$)                       // Observable<QueryKey>
+   * .key(computed(() => ['user', id()])) // Signal<QueryKey>
+   *
    *
    * @public
    * @since 0.1.0
    */
-  key: (key: QueryKey) => QueryBuilder<TData, TError, TParams, TSelected>;
+  key: (
+    key: QueryKey | Observable<QueryKey> | SignalLike<QueryKey>
+  ) => QueryBuilder<TData, TError, TParams, TSelected>;
 
   /**
    * Defines the fetcher used to load data. Must return an `Observable`
@@ -163,7 +172,8 @@ export interface QueryBuilder<
   gcTime(ms: number): QueryBuilder<TData, TError, TParams, TSelected>;
 
   /**
-   * Configures retry behavior for failed fetches.
+   * Configures retry policy for fetch errors. Retries are scheduled using
+   * {@link QueryClient.retryWithBackoff} with exponential backoff.
    *
    * @example
    * .retryWith({ strategy: 'exponential', baseDelayMs: 500, maxAttempts: 5 })
@@ -199,11 +209,15 @@ export interface QueryBuilder<
   ): QueryBuilder<TData, TError, TP, TSelected>;
 
   /**
-   * Projects the current selected value (`TSelected`) into a new shape `TNext`.
-   * Use this to derive view-friendly slices without recomputing in templates.
+   * Projects the current selected value into a new shape. `select` is composable:
+   * multiple calls build a pipeline applied in order.
    *
    * @example
-   * .select(users => users.map(u => u.email)) // TSelected becomes string[]
+   * .select(users => users.filter(u => u.active))
+   * .select(active => active.map(u => u.email)) // runs after the previous select
+   *
+   * @remarks
+   * Each `select` transforms the evolving `TSelected` type for subsequent calls.
    *
    * @public
    * @since 0.1.0
@@ -242,12 +256,12 @@ export interface QueryBuilder<
 
   /**
    * Enables or disables the query. Accepts a boolean, an `Observable<boolean>`,
-   * or an Angular signal-like. When disabled, automatic refetches are paused but
+   * or an Angular Signal. When disabled, automatic refetches are paused but
    * the cached data is retained.
    *
    * @example
    * .enabledWhen(isFeatureEnabled$)
-   * .enabledWhen(() => form.valid) // signal-like
+   * .enabledWhen(() => form.valid)
    *
    * @public
    * @since 0.1.0
@@ -303,6 +317,11 @@ export interface QueryBuilder<
    *   .fetcher(() => http.get<User[]>('/api/users'))
    *   .build();
    *
+   * @remarks
+   * Subscribing to `data$` retains the active hashed key; when the key changes, the
+   * previous key is released. When the last subscriber unsubscribes, the entry is
+   * released and eligible for GC after `gcTime`.
+   *
    * @public
    * @since 0.1.0
    */
@@ -316,14 +335,15 @@ class QueryBuilderImpl<
   TSelected = TData
 > implements QueryBuilder<TData, TError, TParams, TSelected>
 {
-  private queryKey!: QueryKey;
+  private queryKey$?: Observable<QueryKey>;
   private _fetcher!: QueryFetcher<TParams, TData>;
   private _staleTime = this.queryClient.defaults().staleTime;
   private _gcTime = this.queryClient.defaults().gcTime;
   private retry: RetryStrategy = this.queryClient.defaults().retry;
   private enabled$: Observable<boolean> = of(true);
   private params$: Observable<TParams> = of(undefined as TParams);
-  private selector?: SelectFn<TData, TSelected>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly selectors: SelectFn<any, any>[] = [];
   private equal?: (
     a: TSelected | undefined,
     b: TSelected | undefined
@@ -337,6 +357,34 @@ class QueryBuilderImpl<
 
   public constructor(private readonly queryClient: QueryClient) {}
 
+  private to$<T>(v: T | Observable<T> | SignalLike<T>): Observable<T> {
+    if (isObservable(v)) return v;
+    if (isSignal(v)) {
+      return this.ensureInjectorAndRun(() => toObservable(v as Signal<T>));
+    }
+    if (isSignalLike(v)) {
+      return this.ensureInjectorAndRun(() =>
+        toObservable(v as unknown as Signal<T>)
+      );
+    }
+    return of(v);
+  }
+
+  private ensureInjectorAndRun<T>(factory: () => T): T {
+    if (!this.queryClient.injector) {
+      throw new Error(
+        'QueryClient.env injector is missing. Use provideQueryClient() (factory) or pass Observables instead of signals.'
+      );
+    }
+    return runInInjectionContext(this.queryClient.injector, factory);
+  }
+
+  private applySelectors<T = unknown>(input: T): unknown {
+    return this.selectors.reduce<unknown>((acc, fn) => {
+      return acc === undefined ? undefined : fn(acc);
+    }, input);
+  }
+
   /** @inheritdoc */
   public paramsEqualWith(equal: (a: TParams, b: TParams) => boolean) {
     this.paramsEqual = equal;
@@ -344,8 +392,8 @@ class QueryBuilderImpl<
   }
 
   /** @inheritdoc */
-  public key(key: QueryKey) {
-    this.queryKey = key;
+  public key(key: QueryKey | Observable<QueryKey> | SignalLike<QueryKey>) {
+    this.queryKey$ = this.to$(key);
     return this;
   }
 
@@ -377,21 +425,13 @@ class QueryBuilderImpl<
   public params<TP>(
     parameter: TP | Observable<TP> | SignalLike<TP>
   ): QueryBuilder<TData, TError, TP, TSelected> {
-    if (isObservable(parameter)) {
-      this.params$ = parameter as unknown as Observable<TParams>;
-    } else if (isSignal(parameter) || isSignalLike(parameter)) {
-      this.params$ = toObservable(
-        parameter as Signal<TParams>
-      ) as unknown as Observable<TParams>;
-    } else {
-      this.params$ = of(parameter) as unknown as Observable<TParams>;
-    }
+    this.params$ = this.to$(parameter) as unknown as Observable<TParams>;
     return this as unknown as QueryBuilderImpl<TData, TError, TP, TSelected>;
   }
 
   /** @inheritdoc */
   public select<TNext>(mapper: SelectFn<TSelected, TNext>) {
-    this.selector = mapper as unknown as SelectFn<TData, TSelected>;
+    this.selectors.push(mapper as unknown as SelectFn<TData, TSelected>);
     return this as unknown as QueryBuilderImpl<TData, TError, TParams, TNext>;
   }
 
@@ -407,13 +447,8 @@ class QueryBuilderImpl<
   public enabledWhen(
     value: boolean | Observable<boolean> | SignalLike<boolean>
   ) {
-    if (isObservable(value)) {
-      this.enabled$ = value;
-    } else if (isSignal(value) || isSignalLike(value)) {
-      this.enabled$ = toObservable(value as Signal<boolean>);
-    } else {
-      this.enabled$ = of(value);
-    }
+    this.enabled$ =
+      typeof value === 'boolean' ? of(value) : this.to$<boolean>(value);
     return this;
   }
 
@@ -437,14 +472,34 @@ class QueryBuilderImpl<
 
   /** @inheritdoc */
   public build(): BuiltQuery<TSelected, TError> {
-    if (!this.queryKey) throw new Error('Query key is required. Use .key(...)');
+    if (!this.queryKey$)
+      throw new Error('Query key is required. Use .key(...)');
     if (!this._fetcher)
       throw new Error('Query fetcher is required. Use .fetcher(...)');
 
-    const hashed = hashQueryKey(this.queryKey);
-    const state$ = this.queryClient.queries.get$(hashed) as BehaviorSubject<
-      QueryState<TData, TError>
-    >;
+    const hashed$ = this.queryKey$.pipe(
+      map((k) => hashQueryKey(k)),
+      distinctUntilChanged()
+    );
+
+    const stateSubject$ = hashed$.pipe(
+      map(
+        (h) =>
+          this.queryClient.queries.get$(h) as BehaviorSubject<
+            QueryState<TData, TError>
+          >
+      )
+    );
+
+    const state$ = hashed$.pipe(
+      map(
+        (h) =>
+          this.queryClient.queries.get$(h) as BehaviorSubject<
+            QueryState<TData, TError>
+          >
+      ),
+      switchMap((s$) => s$)
+    );
 
     const focus$ =
       this.refetchOnFocus && isBrowser()
@@ -457,8 +512,11 @@ class QueryBuilderImpl<
     const poll$ = this.pollingInterval
       ? interval(this.pollingInterval).pipe(map(() => 'interval' as const))
       : EMPTY;
-    const invalidations$ = this.queryClient.invalidations$().pipe(
-      filter((predicate) => predicate(hashed, new Set())),
+    const invalidations$ = combineLatest([
+      this.queryClient.invalidations$(),
+      hashed$,
+    ]).pipe(
+      filter(([predicate, h]) => predicate(h, new Set())),
       map(() => 'manual' as const)
     );
     const paramsChanged$ = this.params$.pipe(
@@ -466,37 +524,47 @@ class QueryBuilderImpl<
       map(() => 'params' as const)
     );
 
-    const runFetch$ = defer(() => {
-      const abortController = new AbortController();
-      state$.next({ ...state$.value, status: 'loading', isFetching: true });
+    const runFetch$ = defer(() =>
+      stateSubject$.pipe(
+        take(1),
+        switchMap((subject) => {
+          const abortController = new AbortController();
 
-      const run$ = this.params$.pipe(
-        switchMap((currentParams) =>
-          this._fetcher(currentParams, abortController.signal).pipe(
-            tap({
-              next: (data) =>
-                state$.next({
-                  status: 'success',
-                  data,
-                  isFetching: false,
-                  updatedAt: Date.now(),
-                  error: undefined,
-                }),
-              error: (error) =>
-                state$.next({
-                  ...state$.value,
-                  status: 'error',
-                  error,
-                  isFetching: false,
-                }),
-            }),
-            finalize(() => abortController.abort())
-          )
-        )
-      );
+          subject.next({
+            ...subject.value,
+            status: 'loading',
+            isFetching: true,
+          });
 
-      return this.queryClient.retryWithBackoff(() => run$, this.retry);
-    });
+          const run$ = this.params$.pipe(
+            switchMap((currentParams) =>
+              this._fetcher(currentParams, abortController.signal).pipe(
+                tap({
+                  next: (data) =>
+                    subject.next({
+                      status: 'success',
+                      data,
+                      isFetching: false,
+                      updatedAt: Date.now(),
+                      error: undefined,
+                    }),
+                  error: (error) =>
+                    subject.next({
+                      ...subject.value,
+                      status: 'error',
+                      error,
+                      isFetching: false,
+                    }),
+                }),
+                finalize(() => abortController.abort())
+              )
+            )
+          );
+
+          return this.queryClient.retryWithBackoff(() => run$, this.retry);
+        })
+      )
+    );
 
     const trigger$ = merge(
       this.refetch$,
@@ -510,43 +578,42 @@ class QueryBuilderImpl<
     const selected$ = combineLatest([
       state$,
       this.enabled$.pipe(startWith(true)),
+      merge(of<'init'>('init'), trigger$),
     ]).pipe(
-      switchMap(([state, enabled]) => {
+      switchMap(([state, enabled, tick]) => {
+        if (!enabled) return of(state);
+
         const isStale =
           !state.updatedAt ||
           Date.now() - (state.updatedAt ?? 0) >= this._staleTime;
-        if (!enabled) return of(state);
-        return isStale && !state.isFetching
-          ? runFetch$.pipe(map(() => state$.value))
+
+        const shouldRefetch = !state.isFetching && (isStale || tick !== 'init');
+
+        return shouldRefetch
+          ? runFetch$.pipe(switchMap(() => state$.pipe(take(1))))
           : of(state);
       }),
-      map((state) =>
-        this.selector
-          ? state.data !== undefined
-            ? (this.selector as unknown as SelectFn<TSelected, TSelected>)(
-                state.data as unknown as TSelected
-              )
-            : undefined
-          : (state.data as TSelected | undefined)
-      ),
+      map((state) => {
+        if (state.data === undefined) return undefined;
+        return this.applySelectors(state.data) as TSelected;
+      }),
       distinctUntilChanged(this.equal ?? ((a, b) => a === b))
     );
 
     const data$ = defer(() => {
-      this.queryClient.retain(hashed);
+      let currentH: string | undefined;
 
-      const subscription = trigger$
-        .pipe(
-          switchMap(() => this.enabled$),
-          filter(Boolean),
-          switchMap(() => runFetch$)
-        )
-        .subscribe();
+      const retainSub = hashed$.subscribe((h) => {
+        if (currentH && currentH !== h)
+          this.queryClient.release(currentH, this._gcTime);
+        this.queryClient.retain(h);
+        currentH = h;
+      });
 
       return selected$.pipe(
         finalize(() => {
-          subscription.unsubscribe();
-          this.queryClient.release(hashed, this._gcTime);
+          retainSub.unsubscribe();
+          if (currentH) this.queryClient.release(currentH, this._gcTime);
         })
       );
     }).pipe(shareReplay({ bufferSize: 1, refCount: true }));

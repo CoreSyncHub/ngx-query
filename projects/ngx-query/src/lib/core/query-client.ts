@@ -19,6 +19,7 @@ import {
   QueryState,
   RetryStrategy,
 } from './types';
+import { EnvironmentInjector } from '@angular/core';
 
 export class QueryClient {
   public readonly queries: QueryCache;
@@ -31,7 +32,10 @@ export class QueryClient {
 
   private readonly refCounts = new Map<string, number>();
 
-  public constructor(config?: Partial<QueryConfig>) {
+  public constructor(
+    config?: Partial<QueryConfig>,
+    public readonly injector?: EnvironmentInjector
+  ) {
     this.config = {
       staleTime: 5_000,
       gcTime: 5 * 60_000,
