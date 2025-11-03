@@ -668,7 +668,8 @@ class QueryBuilderImpl<
               ? undefined
               : (this.applySelectors(s.data) as TSelected)
           ),
-          distinctUntilChanged(this.equal ?? ((a, b) => a === b))
+          distinctUntilChanged(this.equal ?? ((a, b) => a === b)),
+          shareReplay({ bufferSize: 1, refCount: true })
         );
 
         const errors$ = state$.pipe(
@@ -680,7 +681,8 @@ class QueryBuilderImpl<
             (x): x is { error: NonNullable<TError>; tick: number } =>
               x !== undefined
           ),
-          map((x) => x.error)
+          map((x) => x.error),
+          shareReplay({ bufferSize: 1, refCount: true })
         );
 
         const successEvents$ = selected$.pipe(

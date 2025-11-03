@@ -8,7 +8,7 @@
     "build:local": "ng build ngx-query && cd dist/ngx-query && npm pack",
     "lint": "ng lint",
     "test": "ng test",
-    "release": "npm run build && shx cp README.md dist/ngx-query/ && shx cp LICENSE dist/ngx-query/ && cd dist/ngx-query && npm publish --access public  --provenance",
+    "release": "npm run build && shx cp README.md dist/ngx-query/ && shx cp LICENSE dist/ngx-query/ && cd dist/ngx-query && npm publish --access public",
     "prepublishOnly": "node -e \"if(!process.env.CI){console.error('Use npm run release');process.exit(1)}\"",
     "prepack": "npm run build"
   },
