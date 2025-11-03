@@ -17,6 +17,7 @@ import {
   shareReplay,
   startWith,
   Subject,
+  Subscription,
   switchMap,
   take,
   tap,
@@ -311,6 +312,57 @@ export interface QueryBuilder<
   pollEvery(ms: number): QueryBuilder<TData, TError, TParams, TSelected>;
 
   /**
+   * Registers a callback invoked **after all `select()` projections have been applied**
+   * and once per successful fetch cycle.
+   * @param cb - Callback receiving the selected data.
+   *
+   * @example
+   * .onSuccess(data => console.log('Fetched', data))
+   *
+   * @public
+   * @since 0.3.0
+   */
+  onSuccess(
+    cb: (data: TSelected) => void
+  ): QueryBuilder<TData, TError, TParams, TSelected>;
+
+  /**
+   * Registers a callback invoked **after all `select()` projections have been applied**
+   * and once per failed fetch cycle.
+   * @param cb - Callback receiving the error.
+   *
+   * @example
+   * .onError(error => console.error('Fetch error', error))
+   *
+   * @public
+   * @since 0.3.0
+   */
+  onError(
+    cb: (error: TError) => void
+  ): QueryBuilder<TData, TError, TParams, TSelected>;
+
+  /**
+   * Invoked after each fetch cycle completes, whether it succeeds or fails.
+   * Executes after `.select()` projections and before the next refetch decision.
+   * @param cb - Callback receiving the selected data or `undefined`, and the error or `undefined`.
+   *
+   * @example
+   * .onSettled((data, error) => {
+   *   if (error) {
+   *     console.error('Fetch error', error);
+   *   } else {
+   *     console.log('Fetched', data);
+   *   }
+   * })
+   *
+   * @public
+   * @since 0.3.0
+   */
+  onSettled(
+    cb: (data: TSelected | undefined, error: TError | undefined) => void
+  ): QueryBuilder<TData, TError, TParams, TSelected>;
+
+  /**
    * Finalizes the builder and returns the reactive query interface.
    *
    * @example
@@ -355,6 +407,12 @@ class QueryBuilderImpl<
   private refetchOnReconnect = this.queryClient.defaults().refetchOnReconnect;
   private pollingInterval?: number;
   private paramsEqual?: (a: TParams, b: TParams) => boolean;
+
+  private readonly successHandlers: Array<(d: TSelected) => void> = [];
+  private readonly errorHandlers: Array<(e: TError) => void> = [];
+  private readonly settledHandlers: Array<
+    (d: TSelected | undefined, e: TError | undefined) => void
+  > = [];
 
   private readonly refetch$ = new Subject<RefetchReason>();
 
@@ -474,6 +532,26 @@ class QueryBuilderImpl<
   }
 
   /** @inheritdoc */
+  public onSuccess(cb: (d: TSelected) => void) {
+    this.successHandlers.push(cb);
+    return this;
+  }
+
+  /** @inheritdoc */
+  public onError(cb: (e: TError) => void) {
+    this.errorHandlers.push(cb);
+    return this;
+  }
+
+  /** @inheritdoc */
+  public onSettled(
+    cb: (d: TSelected | undefined, e: TError | undefined) => void
+  ) {
+    this.settledHandlers.push(cb);
+    return this;
+  }
+
+  /** @inheritdoc */
   public build(): BuiltQuery<TSelected, TError> {
     if (!this.queryKey$)
       throw new Error('Query key is required. Use .key(...)');
@@ -511,6 +589,11 @@ class QueryBuilderImpl<
           distinctUntilChanged(this.paramsEqual ?? ((a, b) => a === b)),
           map(() => 'params' as const)
         );
+        const enabledTick$ = this.enabled$.pipe(
+          distinctUntilChanged(),
+          filter(Boolean),
+          map(() => 'enabled' as const)
+        );
 
         const runFetch$ = defer(() => {
           const abortController = new AbortController();
@@ -541,7 +624,8 @@ class QueryBuilderImpl<
                       error,
                       isFetching: false,
                     }),
-                })
+                }),
+                finalize(() => abortController.abort())
               )
             )
           );
@@ -558,7 +642,8 @@ class QueryBuilderImpl<
           online$,
           poll$,
           invalidations$,
-          paramsChanged$
+          paramsChanged$,
+          enabledTick$
         );
 
         const driver$ = trigger$.pipe(
@@ -586,41 +671,98 @@ class QueryBuilderImpl<
           distinctUntilChanged(this.equal ?? ((a, b) => a === b))
         );
 
-        return { h, state$, driver$, selected$ };
+        const errors$ = state$.pipe(
+          map((s) => s.error as TError | undefined),
+          map((e) =>
+            e == null ? undefined : ({ error: e, tick: Date.now() } as const)
+          ),
+          filter(
+            (x): x is { error: NonNullable<TError>; tick: number } =>
+              x !== undefined
+          ),
+          map((x) => x.error)
+        );
+
+        const successEvents$ = selected$.pipe(
+          filter((v): v is TSelected => v !== undefined),
+          tap((val) => {
+            for (const cb of this.successHandlers) cb(val);
+            for (const cb of this.settledHandlers) cb(val, undefined);
+          })
+        );
+
+        const errorEvents$ = errors$.pipe(
+          tap((err) => {
+            for (const cb of this.errorHandlers) cb(err);
+            for (const cb of this.settledHandlers) cb(undefined, err);
+          })
+        );
+
+        return { h, state$, driver$, selected$, successEvents$, errorEvents$ };
       }),
       shareReplay({ bufferSize: 1, refCount: true })
     );
 
-    const data$ = defer(() => {
-      let currentH: string | undefined;
+    let refCount = 0;
+    let currentH: string | undefined;
+    let retainSub: Subscription | null = null;
+    let driverSub: Subscription | null = null;
+    let okSub: Subscription | null = null;
+    let errSub: Subscription | null = null;
 
-      const retainSub = scoped$.subscribe(({ h }) => {
+    // =========================
+    // Multi-Streams
+    // =========================
+    const start = () => {
+      if (refCount++ > 0) return;
+
+      retainSub = scoped$.subscribe(({ h }) => {
         if (currentH && currentH !== h)
           this.queryClient.release(currentH, this._gcTime);
         this.queryClient.retain(h);
         currentH = h;
       });
+      driverSub = scoped$.pipe(switchMap((s) => s.driver$)).subscribe();
+      okSub = scoped$.pipe(switchMap((s) => s.successEvents$)).subscribe();
+      errSub = scoped$.pipe(switchMap((s) => s.errorEvents$)).subscribe();
+    };
 
-      const driverSub = scoped$.pipe(switchMap((s) => s.driver$)).subscribe();
+    const stop = () => {
+      if (--refCount > 0) return;
 
-      return scoped$.pipe(
-        switchMap((s) => s.selected$),
-        finalize(() => {
-          driverSub.unsubscribe();
-          retainSub.unsubscribe();
-          if (currentH) this.queryClient.release(currentH, this._gcTime);
-        })
-      );
-    }).pipe(shareReplay({ bufferSize: 1, refCount: true }));
+      errSub?.unsubscribe();
+      errSub = null;
+      okSub?.unsubscribe();
+      okSub = null;
+      driverSub?.unsubscribe();
+      driverSub = null;
+      retainSub?.unsubscribe();
+      retainSub = null;
 
-    const status$ = scoped$.pipe(
-      switchMap((s) => s.state$.pipe(map((st) => st.status)))
+      if (currentH) {
+        this.queryClient.release(currentH, this._gcTime);
+        currentH = undefined;
+      }
+    };
+
+    const withActivation = <T>(inner$: Observable<T>) =>
+      defer(() => {
+        start();
+        return inner$.pipe(finalize(stop));
+      });
+
+    const data$ = withActivation(
+      scoped$.pipe(switchMap((s) => s.selected$))
+    ).pipe(shareReplay({ bufferSize: 1, refCount: true }));
+
+    const status$ = withActivation(
+      scoped$.pipe(switchMap((s) => s.state$.pipe(map((st) => st.status))))
     );
-    const error$ = scoped$.pipe(
-      switchMap((s) => s.state$.pipe(map((st) => st.error)))
+    const error$ = withActivation(
+      scoped$.pipe(switchMap((s) => s.state$.pipe(map((st) => st.error))))
     );
-    const isFetching$ = scoped$.pipe(
-      switchMap((s) => s.state$.pipe(map((st) => st.isFetching)))
+    const isFetching$ = withActivation(
+      scoped$.pipe(switchMap((s) => s.state$.pipe(map((st) => st.isFetching))))
     );
 
     return {
@@ -630,6 +772,52 @@ class QueryBuilderImpl<
       isFetching$,
       refetch: (reason: RefetchReason = 'manual') => this.refetch$.next(reason),
     };
+
+    // const data$ = defer(() => {
+    //   let currentH: string | undefined;
+
+    //   const retainSub = scoped$.subscribe(({ h }) => {
+    //     if (currentH && currentH !== h)
+    //       this.queryClient.release(currentH, this._gcTime);
+    //     this.queryClient.retain(h);
+    //     currentH = h;
+    //   });
+
+    //   const driverSub = scoped$.pipe(switchMap((s) => s.driver$)).subscribe();
+    //   const okSub = scoped$
+    //     .pipe(switchMap((s) => s.successEvents$))
+    //     .subscribe();
+    //   const errSub = scoped$.pipe(switchMap((s) => s.errorEvents$)).subscribe();
+
+    //   return scoped$.pipe(
+    //     switchMap((s) => s.selected$),
+    //     finalize(() => {
+    //       errSub.unsubscribe();
+    //       okSub.unsubscribe();
+    //       driverSub.unsubscribe();
+    //       retainSub.unsubscribe();
+    //       if (currentH) this.queryClient.release(currentH, this._gcTime);
+    //     })
+    //   );
+    // }).pipe(shareReplay({ bufferSize: 1, refCount: true }));
+
+    // const status$ = scoped$.pipe(
+    //   switchMap((s) => s.state$.pipe(map((st) => st.status)))
+    // );
+    // const error$ = scoped$.pipe(
+    //   switchMap((s) => s.state$.pipe(map((st) => st.error)))
+    // );
+    // const isFetching$ = scoped$.pipe(
+    //   switchMap((s) => s.state$.pipe(map((st) => st.isFetching)))
+    // );
+
+    // return {
+    //   data$,
+    //   error$,
+    //   status$,
+    //   isFetching$,
+    //   refetch: (reason: RefetchReason = 'manual') => this.refetch$.next(reason),
+    // };
   }
 }
 
