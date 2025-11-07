@@ -646,18 +646,22 @@ class QueryBuilderImpl<
           enabledTick$
         );
 
-        const driver$ = trigger$.pipe(
-          withLatestFrom(state$, this.enabled$.pipe(startWith(true))),
-          filter(([, , enabled]) => enabled),
-          exhaustMap(([tick, state]) => {
-            const needsFirst = state.status === 'idle' && !state.isFetching;
-            const isStale =
-              !state.updatedAt ||
-              Date.now() - (state.updatedAt ?? 0) >= this._staleTime;
-            const external = tick !== 'init';
-            const shouldRefetch =
-              needsFirst || (!state.isFetching && (isStale || external));
-            return shouldRefetch ? runFetch$ : EMPTY;
+        const driver$ = this.enabled$.pipe(
+          switchMap((enabled) => {
+            if (!enabled) return EMPTY;
+            return trigger$.pipe(
+              withLatestFrom(state$),
+              exhaustMap(([tick, state]) => {
+                const needsFirst = state.status === 'idle' && !state.isFetching;
+                const isStale =
+                  !state.updatedAt ||
+                  Date.now() - (state.updatedAt ?? 0) >= this._staleTime;
+                const external = tick !== 'init';
+                const shouldRefetch =
+                  needsFirst || (!state.isFetching && (isStale || external));
+                return shouldRefetch ? runFetch$ : EMPTY;
+              })
+            );
           }),
           shareReplay({ bufferSize: 1, refCount: true })
         );
